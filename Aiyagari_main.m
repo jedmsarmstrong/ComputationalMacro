@@ -3,155 +3,151 @@
 % March 2019
 
 %#ok<*NOPTS>
-%tic
 
+tic
+
+%% 0. Housekeeping
 cd('/home/jethro/Documents/Uni/Computational/Aiyagari_1994/')
 
 clear
 close all
 clc
 
-%% Simple case -- 2 states
-% Log utility
-% Made up P
-P = [ 0.9 0.1 %0
-      0.2 0.8 ]%0.2
-      %0.2 0.1 0.7 ];
-  
-[~,e,V] = eig(P);
-sd = V(:,diag(e)==1)./sum(V(:,diag(e)==1));
-n = [0.1 1.0];
-%n = [0.1 0.6 1.0];
+addpath(genpath('/home/jethro/Documents/MATLAB/compecon2011_64_20110718'));  % For ddsimul
+
+%% 1. Generate the transition probability matrix and grids
+% Production and preferences parameters
+alp         = 0.36;
+del         = 0.08;
+beta        = 0.96;
+gamma       = 2;
+
+% TPM parameters
+n_state     = 7;
+rho         = 0.9;
+sigma_eps   = 0.1;
+[e_grid, P] = rouwenhorst(rho,sigma_eps,n_state);
+
+% Find the stationary distribution and implied N
+[~,e,V]     = eig(P);
+stat_dist   = V(:,abs(diag(e)-1)<1e-6)./sum(V(:,abs(diag(e)-1)<1e-6));
+N           = exp(e_grid)*stat_dist;
+
+% Generate the assets grid
+n_grid      = 250;
+max_assets  = 50;    % Chosen by trial and error
+debt_limit  = 0;
+a_grid      = linspace(debt_limit,max_assets,n_grid)';
+
+% Vectorize
+a_vals      = repmat(a_grid,1,n_state);
+e_vals      = repmat(e_grid,n_grid,1);
+
+%% 2. Define some functions for use in the  
+% We use the inverse marginal utility to find a consumption policy
+u_prime          = @(c) c.^(-gamma);
+u_prime_inverse  = @(c) c.^(-1/gamma);
+c_update         = @(c_guess,r) u_prime_inverse(beta * (1+r) * u_prime(c_guess) * P');
+
+% Update assets according to the budget constraint
+A_update         = @(a_prime,r,c,e_vals,w) 1/(1+r) * (c + a_prime - w * exp(e_vals));
+
+%% 3. Solve the problem using the equilibrium function below
+myfun       = @(r) equilibrium(r,a_vals,e_vals,c_update,A_update,P,alp,del,N);
+options     = optimset('display','iter','TolX',1e-9);
+
+r0          = [0.0370 0.03701];     % Chosen by trial and error
+rstar       = fzero(myfun,r0,options);
+
+%% 4. Extract the asset distribution and plot
+[~,as] = equilibrium(rstar,a_vals,e_vals,c_update,A_update,P,alp,del,N);
+
+% We trim the first 1500 periods as burn in
+% Plot a distribution of assets
+figure();
+[counts,edges] = histcounts(as(:,1501:end),n_grid);
+bar(edges(1:end-1)+diff(edges)/2,counts/sum(counts));
+
+% Plot a Lorenz Curve
+end_assets = as(:,1501:end);
+end_assets = sort(end_assets(:));
+total_assets = sum(end_assets);
+asset_prctl = cumsum(end_assets)/total_assets;
+people = (1:length(end_assets))/length(end_assets);
+figure();
+ax = axes();
+plot(people,asset_prctl);
+ax.XLim = [0 1];
+ax.YLim = [0 1];
+rl = refline(1,0);
+rl.LineStyle = '--';
+axis square
 
 
-R = 1 + 0.3;
-alp = 1/3;
-del = 0.05;
-am = 18;
-as = 200;
-beta = 0.96;
+%% Function definition for finding the equilibrium
+function [difference,as,r_new,K] = equilibrium(r,a_vals,e_vals,c_update,A_update,P,alp,del,N)
+%EQUILIBRIUM Given an interest rate r (and other parameters), find EQM
 
-A = 1;
-N = n*sd;
+% Some varues for later
+n_state = size(a_vals,2);
+e_grid = e_vals(1,:);
+% Calculate the equilibrium wage
+wage = (1-alp) * (alp / (r+del)) ^ (alp/(1-alp));
+% Initial consumption -- consume asset wealth plus labor income
+c_0 = r * a_vals + wage * exp(e_vals);
 
-
-w_r = @(r) A * (1-alp) * (A*alp / (r+del)) ^ (alp/(1-alp));
-r_K = @(K) A * alp * (N/K) ^ (1-alp) - del;
-
-n_grid = 100;
-k_grid = linspace(1,4,n_grid);
-
-n_state = length(n);
-%%
-K = 2;
-
-r = r_K(K);
-w = w_r(r);
-
-% Cols = k, rows = n, 3rd = kprime
-V = zeros(n_grid,n_state);
-g = zeros(n_grid,n_state);
-
+% This loops over the consumption update function above to find the optimal
+% consumption policy
 dist = 1;
-
-while dist > 1e-5
-    c = (R - del) * k_grid' + w*n - repmat(permute(k_grid,[3 1 2]),n_grid,n_state);
-    u = log(c);
-    u(c<0) = -inf;
-
-    Ev = V*P';
-    Vn = u + beta * repmat(permute(Ev,[3 2 1]),n_grid,1);
-
-    [Vn,gn] = max(Vn,[],3);
-    dist = max(max(abs(V-Vn))) + max(max(abs(g - gn)));
-
-    V = Vn;
-    g = gn;
-
-end
-
-%%
-% Big transition matrix
-mu = zeros(n_grid*n_state);
-
-inds = reshape(g,[n_grid*n_state 1]);
-for ii = 1 : length(inds)
-    nind = floor((ii-1)/n_grid) + 1;
-    mu(ii,inds(ii)+(0:n_grid:(n_state-1)*n_grid)) = P(nind,:);
-end
-% Update K
-[~,e,V_mu] = eig(mu);
-sd_mu = V_mu(:,abs(diag(e)-1)<1e-6)./sum(V_mu(:,abs(diag(e)-1)<1e-6));
-
-%%
-NN = 1000;
-ks = randi(n_grid,NN,1);
-zs = randi(n_state,NN,1);
-mn = mean(ks);
-sd = std(ks);
-
-dist = 1;
-while dist > 1e-3 
-    ksp = g(sub2ind([n_grid n_state],ks,zs));
-    zsp = randi(n_state,NN,1);
+disp('Finding optimal consumption policy...')
+while dist > 1e-6
+    c_new = c_update(c_0,r);
+    A_new = A_update(a_vals,r,c_new,e_vals,wage);
     
-    mnp = mean(ksp);
-    sdp = std(ksp);
+    % Interpolate these guys along the grid
+    c_new_grid = zeros(size(a_vals));
+    for ii = 1 : n_state
+        c_new_grid(:,ii)  = interp1(A_new(:,ii),c_new(:,ii),a_vals(:,ii),'spline');
+    end
+    % In cases where the debt limit is binding we can just update using the
+    % budget constraint
+    c_new_binding = (1+r) * a_vals + wage * exp(e_vals);
 
-    dist = max(abs(mnp - mn)) + max(abs(sdp - sd))
+    c_final = zeros(size(a_vals));
+    for ii = 1 : n_state
+        c_final(:,ii) = (a_vals(:,1)>A_new(1,ii)).*c_new_grid(:,ii)+(a_vals(:,ii)<=A_new(1,ii)).*c_new_binding(:,ii);
+    end
     
-    ks = ksp;
-    mn = mnp;
-    sd = sdp;
-    zs = zsp;
+    dist = norm((c_final-c_0)./c_0);
+    c_0 = c_final;
+
 end
 
+% Do all of the epsilon simulation first
+disp('Monte Carlo simulating...')
 
+NN = 10000;
+TT = 2000;
+as = nan(NN,TT+1);
+cs = nan(NN,TT);
 
-%%
-K = 2;
-dist2 = 1;
-while dist2 > 1e-5
-    r = r_K(K);
-    w = w_r(r);
+eps_ind = ddpsimul(P,randi(n_state,NN,1),TT-1,1);
+as(:,1) = a_vals(randi(size(a_vals,1),NN,1),1);
+eps = exp(e_grid(eps_ind));
 
-    % Cols = k, rows = n, 3rd = kprime
-    V = zeros(n_grid,n_state);
-    g = zeros(n_grid,n_state);
-
-    dist = 1;
-
-    while dist > 1e-5
-        c = (R - del) * k_grid' + w*n - repmat(permute(k_grid,[3 1 2]),n_grid,n_state);
-        u = log(c);
-        u(c<0) = -inf;
-
-        Ev = V*P';
-        Vn = u + beta * repmat(permute(Ev,[3 2 1]),n_grid,1);
-
-        [Vn,gn] = max(Vn,[],3);
-        dist = max(max(abs(V-Vn))) + max(max(abs(g - gn)));
-
-        V = Vn;
-        g = gn;
-
+for tt = 1 : TT
+    cs(:,tt)   = 0;
+    for ii = 1 : n_state
+        cs(:,tt) = cs(:,tt) + (eps_ind(:,tt)==ii).*interp1(a_vals(:,ii),c_0(:,ii),as(:,tt),'spline');
     end
+    as(:,tt+1) = (1+r)*as(:,tt)+eps(:,tt)*wage-cs(:,tt);
 
-    % Big transition matrix
-    mu = zeros(n_grid*n_state);
-
-    inds = reshape(g,[n_grid*n_state 1]);
-    for ii = 1 : length(inds)
-        nind = floor((ii-1)/n_state) + 1;
-        mu(ii,[inds(ii) inds(ii)+n_grid inds(ii)+2*n_grid]) = P(nind,:);
-    end
-    % Update K
-    [~,e,V_mu] = eig(mu);
-    sd_mu = V_mu(:,abs(diag(e)-1)<1e-6)./sum(V_mu(:,abs(diag(e)-1)<1e-6));
-    Kn = k_grid(inds) * sd_mu;
-
-    dist2 = abs(Kn-K)
-    Kn = K
 end
-plot(V)
+
+K = mean(mean(as(:,TT-500:TT)));
+r_new = alp * (K/N)^(alp-1) - del;
+
+difference = (r_new-r)/r;
+
+end
 
